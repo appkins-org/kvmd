@@ -70,9 +70,9 @@ class RedfishApi:
 
         self.__actions: dict[
             str,
-            (dict[str, Callable[[any], bool], None] | None)
+            dict[str, Callable[[Any], bool], None]
             ] = {
-            "kvm": {
+            "pikvm": {
                 "ComputerSystem.Reset": {
                     "On": self.__atx.power_on,
                     "ForceOff": self.__atx.power_off_hard,
@@ -85,7 +85,7 @@ class RedfishApi:
         }
 
         self.__power_state: dict[str, Callable[[], bool]] = {
-            "kvm": functools.partial(
+            "pikvm": functools.partial(
                 self.get_state,
                 self.__atx.get_state,
                 lambda st: st.get("leds", {})["power"]
