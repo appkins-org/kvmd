@@ -186,7 +186,7 @@ class KvmdServer(HttpServer):  # pylint: disable=too-many-arguments,too-many-ins
             MsdApi(msd),
             self.__streamer_api,
             ExportApi(info_manager, atx, user_gpio),
-            RedfishApi(info_manager, atx),
+            RedfishApi(info_manager, atx, user_gpio),
         ]
 
         self.__streamer_notifier = aiotools.AioNotifier()

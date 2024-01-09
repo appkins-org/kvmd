@@ -19,8 +19,9 @@
 #                                                                            #
 # ========================================================================== #
 
+import functools
 
-import asyncio
+from typing import Callable, Coroutine, Any
 
 from aiohttp.web import Request
 from aiohttp.web import Response
@@ -33,8 +34,15 @@ from ....plugins.atx import BaseAtx
 
 from ....validators import ValidatorError
 from ....validators import check_string_in_list
+from ....validators.ugpio import valid_ugpio_channel
+
+from ....logging import get_logger
 
 from ..info import InfoManager
+
+from ..ugpio import UserGpio
+
+from .... import aiotools
 
 
 # =====
@@ -50,23 +58,104 @@ class RedfishApi:
     #    redfishtool -S Never -u admin -p admin -r localhost:8080 Systems
     #    redfishtool -S Never -u admin -p admin -r localhost:8080 Systems reset ForceOff
 
-    def __init__(self, info_manager: InfoManager, atx: BaseAtx) -> None:
+    def __init__(
+        self,
+        info_manager: InfoManager,
+        atx: BaseAtx,
+        user_gpio: UserGpio
+    ) -> None:
         self.__info_manager = info_manager
         self.__atx = atx
+        self.__user_gpio = user_gpio
 
-        self.__actions = {
-            "On": self.__atx.power_on,
-            "ForceOff": self.__atx.power_off_hard,
-            "GracefulShutdown": self.__atx.power_off,
-            "ForceRestart": self.__atx.power_reset_hard,
-            "ForceOn": self.__atx.power_on,
-            "PushPowerButton": self.__atx.click_power,
+        self.__actions: dict[
+            str,
+            (dict[str, Callable[[any], bool], None] | None)
+            ] = {
+            "kvm": {
+                "ComputerSystem.Reset": {
+                    "On": self.__atx.power_on,
+                    "ForceOff": self.__atx.power_off_hard,
+                    "GracefulShutdown": self.__atx.power_off,
+                    "ForceRestart": self.__atx.power_reset_hard,
+                    "ForceOn": self.__atx.power_on,
+                    "PushPowerButton": self.__atx.click_power,
+                }
+            }
         }
 
-    # =====
+        self.__power_state: dict[str, Callable[[], bool]] = {
+            "kvm": functools.partial(
+                self.get_state,
+                self.__atx.get_state,
+                lambda st: st.get("leds", {})["power"]
+            )
+        }
+
+        def split_channel(channel: str) -> tuple[str, str]:
+            pts = channel.split("_")
+            sys_id = pts[0]
+            if sys_id not in self.__actions:
+                self.__actions[sys_id] = {}
+            return (sys_id, "_".join(pts[1:]))
+
+        async def sw(c: str, state: bool, wait: bool) -> None:
+            get_logger().info(
+                "SWITCH CHANNEL: %s",
+                c
+            )
+            valid_ugpio_channel(c)
+            await self.__user_gpio.switch(c, state, wait)
+
+        def select_state(channel: str, state: dict[str, dict[str, bool]]) -> bool:
+            return state["outputs"][channel]["state"]
+
+        async def inner_init() -> None:
+            state = await self.__user_gpio.get_state()
+
+            for channel in state["outputs"].keys():
+                (sys_id, action_name) = split_channel(channel)
+
+                if action_name == "power":
+                    ch = channel
+                    get_logger().info(
+                        "ADDING: %s",
+                        ch
+                    )
+
+                    self.__power_state[sys_id] = functools.partial(
+                        self.get_state,
+                        self.__user_gpio.get_state,
+                        functools.partial(select_state, channel)
+                    )
+
+                    on = functools.partial(sw, channel, True)
+                    off = functools.partial(sw, channel, False)
+
+                    self.__actions[sys_id][
+                        "ComputerSystem.Reset"
+                    ] = {
+                        "On": on,
+                        "ForceOn": on,
+                        "ForceOff": off,
+                        "GracefulShutdown": off,
+                        "PushPowerButton": off,
+                    }
+                else:
+                    get_logger().info(
+                        "NOT ADDING: %s",
+                        channel
+                    )
+
+        aiotools.run_sync(inner_init())
+
+    async def get_state(self, inner_get_state: Callable[[], Coroutine[Any, Any, dict]], sel: Callable[[dict], bool]):
+        st = await inner_get_state()
+        state: bool = sel(st)
+        return "On" if state else "Off"
 
     @exposed_http("GET", "/redfish/v1", auth_required=False)
-    async def __root_handler(self, _: Request) -> Response:
+    async def __root_handler(self, _: Request) -> Response: # pylint: disable=unused-private-member
         return make_json_response({
             "@odata.id": "/redfish/v1",
             "@odata.type": "#ServiceRoot.v1_6_0.ServiceRoot",
@@ -77,51 +166,72 @@ class RedfishApi:
         }, wrap_result=False)
 
     @exposed_http("GET", "/redfish/v1/Systems")
-    async def __systems_handler(self, _: Request) -> Response:
+    async def __systems_handler(self, _: Request) -> Response: # pylint: disable=unused-private-member
         return make_json_response({
             "@odata.id": "/redfish/v1/Systems",
             "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
-            "Members": [{"@odata.id": "/redfish/v1/Systems/0"}],
+            "Members": [
+                {
+                    "@odata.id": f"/redfish/v1/Systems/{a}"
+                } for a in self.__actions
+            ],
             "Members@odata.count": 1,
             "Name": "Computer System Collection",
         }, wrap_result=False)
 
-    @exposed_http("GET", "/redfish/v1/Systems/0")
-    async def __server_handler(self, _: Request) -> Response:
-        (atx_state, meta_state) = await asyncio.gather(*[
-            self.__atx.get_state(),
-            self.__info_manager.get_submanager("meta").get_state(),
-        ])
+    @exposed_http("GET", "/redfish/v1/Systems/{id}")
+    async def __server_handler(self, request: Request) -> Response: # pylint: disable=unused-private-member
+        meta_state = await self.__info_manager.get_submanager("meta").get_state()
+        system_id = request.match_info['id']
         try:
-            host = str(meta_state.get("server", {})["host"])  # type: ignore
-        except Exception:
+            host = meta_state.get("server", {})["host"]
+        except Exception: # pylint: disable=broad-exception-caught
             host = ""
+        actions = {}
+        for k, a in self.__actions[system_id].items():
+            sk = k.split(".")[1]
+            actions[f"#{k}"] = {
+                    f"{sk}Type@Redfish.AllowableValues": list(a.keys()),
+                    "target": f"/redfish/v1/Systems/{system_id}/Actions/{k}"
+                }
+        pwr_state = await self.__power_state.get(system_id)()
         return make_json_response({
-            "@odata.id": "/redfish/v1/Systems/0",
+            "@odata.id": f"/redfish/v1/Systems/{system_id}",
             "@odata.type": "#ComputerSystem.v1_10_0.ComputerSystem",
-            "Actions": {
-                "#ComputerSystem.Reset": {
-                    "ResetType@Redfish.AllowableValues": list(self.__actions),
-                    "target": "/redfish/v1/Systems/0/Actions/ComputerSystem.Reset"
-                },
-            },
-            "Id": "0",
+            "Actions": actions,
+            "Id": system_id,
             "HostName": host,
-            "PowerState": ("On" if atx_state["leds"]["power"] else "Off"),  # type: ignore
+            "PowerState": pwr_state,
         }, wrap_result=False)
 
-    @exposed_http("POST", "/redfish/v1/Systems/0/Actions/ComputerSystem.Reset")
-    async def __power_handler(self, request: Request) -> Response:
+    @exposed_http("POST", "/redfish/v1/Systems/{id}/Actions/{action}")
+    async def __action_handler(self, request: Request) -> Response: # pylint: disable=unused-private-member
+        system_id = request.match_info['id']
+        action_name = request.match_info['action']
+        action_sets = self.__actions[system_id]
         try:
+            action_set = check_string_in_list(
+                arg=action_name,
+                name="Redfish Action",
+                variants=set(action_sets.keys()),
+                lower=False,
+            )
+            actions = action_sets[action_set]
+            variant = None
+            match action_set:
+                case "ComputerSystem.Reset":
+                    variant = (await request.json())["ResetType"]
+                case _:
+                    variant = None
             action = check_string_in_list(
-                arg=(await request.json())["ResetType"],
+                arg=variant,
                 name="Redfish ResetType",
-                variants=set(self.__actions),
+                variants=set(actions.keys()),
                 lower=False,
             )
         except ValidatorError:
             raise
         except Exception:
-            raise HttpError("Missing Redfish ResetType", 400)
-        await self.__actions[action](False)
+            raise HttpError("Missing Redfish Action", 400) # pylint: disable=W0707
+        await actions[action](False)
         return Response(body=None, status=204)
