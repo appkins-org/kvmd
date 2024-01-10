@@ -51,13 +51,16 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         self,
         instance_name: str,
         notifier: aiotools.AioNotifier,
+
         url: str,
-        verify: bool,
         user: str,
         passwd: str,
         mac: str,
-        state_poll: float,
+        verify: bool,
+        
         timeout: float,
+        switch_delay: float,
+        state_poll: float,
     ) -> None:
 
         super().__init__(instance_name, notifier)
@@ -68,15 +71,17 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         self.__passwd = passwd
         self.__mac = mac
         self.__state_poll = state_poll
+        
         self.__timeout = timeout
+        self.__switch_delay = switch_delay
 
         self.__initial: dict[str, (bool | None)] = {}
 
         self.__state: dict[str, (bool | None)] = {}
-        
+
         self.__port_table: dict[str, dict[str, any]] = {}
         self.__port_overrides: dict[str, dict[str, any]] = {}
-        
+
         self.__update_notifier = aiotools.AioNotifier()
 
         self.__http_session: (aiohttp.ClientSession | None) = None
@@ -95,73 +100,66 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
             "mac":        Option("",   type=valid_stripped_string_not_empty),
             "state_poll": Option(5.0,  type=valid_float_f01),
             "timeout":    Option(5.0,  type=valid_float_f01),
+            "switch_delay": Option(1.0,  type=valid_float_f01),
         }
 
     @classmethod
     def get_pin_validator(cls) -> Callable[[Any], Any]:
-        return functools.partial(valid_stripped_string_not_empty, name="UNIFI pin")
-        #return functools.partial(valid_number, min=0, max=47, name="UNIFI port")
+        return valid_stripped_string_not_empty
 
     def register_input(self, pin: str, debounce: float) -> None:
         _ = debounce
-        if pin.isnumeric() is False:
-            get_logger().info("UNIFI: pin is not numeric: %s", pin)
-            return
         self.__state[pin] = None
 
     def register_output(self, pin: str, initial: (bool | None)) -> None:
-        if pin.isnumeric() is False:
-            get_logger().info("UNIFI: pin is not numeric: %s", pin)
-            return
-        self.__initial[pin] = initial
-        self.__state[pin] = None
+        if pin.isnumeric():
+            self.__initial[pin] = initial
+            self.__state[pin] = None
 
     def prepare(self) -> None:
         for (pin, state) in self.__initial.items():
-            if pin.isnumeric() is False:
-                get_logger().info("UNIFI: pin is not numeric: %s", pin)
-                return
-            if state is None:
-                state = False
-            self.__state[pin] = state
-        return
+            if pin.isnumeric():
+                if state is not None:
+                    self.__state[pin] = state
 
     async def run(self) -> None:
         prev_state: (dict | None) = None
         while True:
             session = await self.__ensure_http_session()
             try:
-                # if self.__csrf_token is None:
-                #     await self.login()
                 async with session.get(
                     url=f"{self.__api_url}/stat/device/{self.__mac}",
                     headers=self.__get_headers(),
                     verify_ssl=self.__verify
                 ) as response:
-                    # self.__set_headers(response.headers)
+
                     htclient.raise_not_200(response)
-                    
-                    for header in response.headers:
-                        if header.upper() == "X-CSRF-TOKEN":
-                            self.__csrf_token = response.headers[header]
+                    self.__handle_headers(response.headers)
                     
                     status = (await response.json())["data"][0]
                     if self.__id is None or self.__id != status["_id"]:
                         self.__id = status["_id"]
                         
-                    self.__port_overrides = dict(map(lambda port: (str(port["port_idx"]), port), status["port_overrides"]))
-                    self.__port_table = dict(map(lambda port: (str(port["port_idx"]), port), list(filter(lambda p: p["port_poe"] is True , status["port_table"]))))
+                    port_overrides = dict(map(lambda port: (str(port["port_idx"]), port), status["port_overrides"]))
                     
-                    # self.__state = map(lambda pin: self.__port_table[pin-1]["poe_enabled"], self.__state)
+                    for k, port in port_overrides.items():
+                        self.__port_overrides[k] = port
+                    
+                    port_table = dict(map(lambda port: (str(port["port_idx"]), port), list(filter(lambda p: p["port_poe"] is True , status["port_table"]))))
+                    
+                    for k, port in port_table.items():
+                        self.__port_table[k] = port
+
                     for pin in self.__state:
                         if pin is not None:
-                            self.__state[pin] = self.__port_table[pin]["poe_enable"]
-                            # port = status["port_table"][pin-1]
-                            # if port["port_idx"] == pin:
-                            #     self.__state[pin] = port
+                            self.__state[pin] = self.__port_table[pin]["poe_mode"] == "auto"
+            
+            except aiohttp.ClientResponseError as err:
+                self.__handle_client_response_error(err)
             except Exception as err:
                 get_logger().error("Failed UNIFI bulk GET request: %s", tools.efmt(err))
                 self.__state = dict.fromkeys(self.__state, None)
+            
             if self.__state != prev_state:
                 self._notifier.notify()
                 prev_state = self.__state
@@ -176,89 +174,109 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
 
     async def read(self, pin: str) -> bool:
         if pin.isnumeric() is False:
-            get_logger().info("UNIFI: pin is not numeric: %s", pin)
             return False
         try:
             return await self.__inner_read(pin)
+        except aiohttp.ClientResponseError as err:
+            self.__handle_client_response_error(err)
         except Exception as err:
-            raise err
-            # raise GpioDriverOfflineError(self)
+            raise GpioDriverOfflineError(self)
 
     async def write(self, pin: str, state: bool) -> None:
-        if pin.isnumeric() is False:
-            get_logger().info("UNIFI: pin is not numeric: %s", pin)
-            p = pin.split("-")[0]
-            await self.__cycle_device(p, state)
-            return
         try:
-            await self.__inner_write(pin, state)
+            if pin.isnumeric():
+                await self.__inner_write(pin, state)
+            else:
+                p, _ = self.__parse_pin(pin)
+                await self.__cycle_device(p, state)
+        except aiohttp.ClientResponseError as err:
+            self.__handle_client_response_error(err)
         except Exception as err:
             get_logger().error(
                 "Failed UNIFI PUT request | pin : %s | Error: %s",
                 pin,
                 tools.efmt(err)
             )
-            # raise err
-            # raise GpioDriverOfflineError(self)
-        
+        await asyncio.sleep(self.__switch_delay)  # Slowdown
+        self.__update_notifier.notify()
+            # if False:
+            #     raise GpioDriverOfflineError(self)
         # if self.__should_cycle(pin) is True:
         #     await asyncio.sleep(1)
         #     return
-        
-        self.__update_notifier.notify()
 
     # =====
     
-    def __should_cycle(self, pin: str) -> bool:
-        cycle = self.__initial[pin]
-        if cycle is None:
-            cycle = False
-        return cycle
+    def __parse_pin(self, pin: str) -> (str, str | None):
+        parts = pin.split("-")
+        port = parts[0]
+        action = None
+        if len(parts) > 1:
+            action = parts[1]
+        return (port, action)
+
+    # def __should_cycle(self, pin: str) -> bool:
+    #     cycle = self.__initial[pin]
+    #     if cycle is None:
+    #         cycle = False
+    #     return cycle
 
     async def __inner_read(self, pin: str) -> bool:
-        if pin in self.__state and self.__state[pin] is not None:
-            return self.__state[pin]
-            # return self.__state[pin]["poe_enable"]
-        get_logger().error("Failed to find pin: %s", pin)
-        self.__state[pin] = False
-        # self.__state[pin] = { "poe_enable": False }
-        await self.__inner_run()
-        return False
+        return self.__state[pin] is not None and self.__state[pin]
 
-    async def __inner_run(self) -> None:
-        session = await self.__ensure_http_session()
-        try:
-            # if self.__csrf_token is None:
-            #     await self.login()
-            async with session.get(
-                url=f"{self.__api_url}/stat/device/{self.__mac}",
-                headers=self.__get_headers(),
-                verify_ssl=self.__verify
-            ) as response:
-                # if response.status == 400:
-                #     self.__csrf_token = None
-                
-                # self.__set_headers(response.headers)
-                htclient.raise_not_200(response)
-                
-                for header in response.headers:
-                    if header.upper() == "X-CSRF-TOKEN":
-                        self.__csrf_token = response.headers[header]
-                
-                status = (await response.json())["data"][0]
-                if self.__id is None or self.__id != status["_id"]:
-                    self.__id = status["_id"]
-                
-                self.__port_table = dict(map(lambda port: (str(port["port_idx"]), port), list(filter(lambda p: "poe_enable" in p.keys(), status["port_table"]))))
-                
-                # self.__state = map(lambda pin: self.__port_table[pin-1]["poe_enabled"], self.__state)
-                for pin in self.__state:
-                    if pin is not None:
-                        self.__state[pin] = self.__port_table[pin]["poe_mode"] == "auto"
-        except Exception as err:
-            get_logger().error("Failed UNIFI bulk GET request: %s", tools.efmt(err))
-        finally:
-            get_logger().info("UNIFI status: %s", self.__state)
+        # if pin in self.__state and self.__state[pin] is not None:
+        #     return self.__state[pin]
+        #     # return self.__state[pin]["poe_enable"]
+        # get_logger().error("Failed to find pin: %s", pin)
+        # self.__state[pin] = False
+        # self.__state[pin] = { "poe_enable": False }
+        # await self.__inner_run()
+        # return False
+
+    # async def __inner_run(self) -> None:
+    #     session = await self.__ensure_http_session()
+    #     try:
+    #         # if self.__csrf_token is None:
+    #         #     await self.login()
+    #         async with session.get(
+    #             url=f"{self.__api_url}/stat/device/{self.__mac}",
+    #             headers=self.__get_headers(),
+    #             verify_ssl=self.__verify
+    #         ) as response:
+    #             # if response.status == 400:
+    #             #     self.__csrf_token = None
+    #             
+    #             # self.__handle_headers(response.headers)
+    #             htclient.raise_not_200(response)
+    #             
+    #             for header in response.headers:
+    #                 if header.upper() == "X-CSRF-TOKEN":
+    #                     self.__csrf_token = response.headers[header]
+    #             
+    #             status = (await response.json())["data"][0]
+    #             if self.__id is None or self.__id != status["_id"]:
+    #                 self.__id = status["_id"]
+    #             
+    #             self.__port_table = dict(map(lambda port: (str(port["port_idx"]), port), list(filter(lambda p: "poe_enable" in p.keys(), status["port_table"]))))
+    #             
+    #             # self.__state = map(lambda pin: self.__port_table[pin-1]["poe_enabled"], self.__state)
+    #             for pin in self.__state:
+    #                 if pin is not None:
+    #                     self.__state[pin] = self.__port_table[pin]["poe_mode"] == "auto"
+    #     
+    #     except aiohttp.ClientResponseError as err:
+    #         if err.status == 401:
+    #             get_logger().info(
+    #                 "UNIFI API request unauthorized. Attempting to refresh session"
+    #             )
+    #             try:
+    #                 await self.login()
+    #             except Exception as e:
+    #                 get_logger().error("Failed UNIFI login request: %s", tools.efmt(e))
+    #     except Exception as err:
+    #         get_logger().error("Failed UNIFI bulk GET request: %s", tools.efmt(err))
+    #     finally:
+    #         get_logger().info("UNIFI status: %s", self.__state)
 
     async def __inner_write(self, pin: str, state: bool) -> None:
         # if self.__should_cycle(pin) is True:
@@ -281,7 +299,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
             headers=self.__get_headers(),
             verify_ssl=self.__verify,
         ) as response:
-            self.__set_headers(response.headers)
+            self.__handle_headers(response.headers)
             htclient.raise_not_200(response)
                 
     async def __set_device(self, pin: str, state: bool) -> None:
@@ -326,7 +344,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
             },
             verify_ssl=self.__verify,
         ) as response:
-            # self.__set_headers(response.headers)
+            # self.__handle_headers(response.headers)
             # if response.status == 400:
             #     self.__csrf_token = None
             htclient.raise_not_200(response)
@@ -353,9 +371,20 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         }
         return headers.update(extra) if (extra is not None) else headers
 
-    def __set_headers(self, response_headers: dict[str, str]) -> None:
-        if "X-CSRF-TOKEN" in [h.upper() for h in response_headers]:
-            self.__csrf_token = response_headers["X-CSRF-TOKEN"]
+    def __handle_headers(self, response_headers: dict[str, str]) -> None:
+        for header in response_headers:
+            if header.upper() == "X-CSRF-TOKEN":
+                self.__csrf_token = response_headers[header]
+        # if "X-CSRF-TOKEN" in [h.upper() for h in response_headers]:
+        #     self.__csrf_token = response_headers["X-CSRF-TOKEN"]
+        
+    async def __handle_client_response_error(self, err: aiohttp.ClientResponseError) -> None:
+        if err.status == 401:
+            get_logger().info("UNIFI API request unauthorized. Attempting to refresh session")
+            try:
+                await self.login()
+            except Exception as e:
+                get_logger().error("Failed UNIFI login request: %s", tools.efmt(e))
             
     async def login(self) -> None:
         try:
@@ -411,7 +440,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
             )
             await self.login()
         return self.__http_session
-
+    
     def __str__(self) -> str:
         return f"UNIFI({self._instance_name})"
 
