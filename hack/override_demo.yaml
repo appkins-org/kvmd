@@ -81,6 +81,11 @@ kvmd:
         driver: unifi
         pin: 5
         mode: output
+      server3_cycle:
+        driver: unifi
+        pin: 6-cycle
+        mode: output
+        switch: false
     view:
       table:
         - ["TESMART Switch"]
@@ -88,4 +93,10 @@ kvmd:
         - ["#Server 1", server0_power, server0_led, server0_switch|Switch]
         - ["#Server 2", server1_power, server1_led, server1_switch|Switch]
         - ["#Server 3", server2_power, server2_led, server2_switch|Switch]
-        - ["#Server 4", server3_power, server3_led, server3_switch|Switch]
+        - [
+            "#Server 4",
+            server3_power,
+            server3_led,
+            server3_switch|Switch,
+            server3_cycle|⏻,
+          ]
