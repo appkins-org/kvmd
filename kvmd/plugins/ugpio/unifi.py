@@ -75,6 +75,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         self.__state: dict[str, (bool | None)] = {}
         
         self.__port_table: dict[str, dict[str, any]] = {}
+        self.__port_overrides: dict[str, dict[str, any]] = {}
         
         self.__update_notifier = aiotools.AioNotifier()
 
@@ -172,8 +173,9 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
                     status = (await response.json())["data"][0]
                     if self.__id is None or self.__id != status["_id"]:
                         self.__id = status["_id"]
-                    
-                    self.__port_table = dict(map(lambda port: (str(port["port_idx"]), port), list(filter(lambda p: "poe_enable" in p.keys(), status["port_table"]))))
+                        
+                    self.__port_overrides = dict(map(lambda port: (str(port["port_idx"]), port), status["port_overrides"]))
+                    self.__port_table = dict(map(lambda port: (str(port["port_idx"]), port), list(filter(lambda p: p["port_poe"] is True , status["port_table"]))))
                     
                     # self.__state = map(lambda pin: self.__port_table[pin-1]["poe_enabled"], self.__state)
                     for pin in self.__state:
@@ -272,7 +274,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
                 # self.__state = map(lambda pin: self.__port_table[pin-1]["poe_enabled"], self.__state)
                 for pin in self.__state:
                     if pin is not None:
-                        self.__state[pin] = self.__port_table[pin]["poe_enable"]
+                        self.__state[pin] = self.__port_table[pin]["poe_mode"] == "auto"
         except Exception as err:
             get_logger().error("Failed UNIFI bulk GET request: %s", tools.efmt(err))
         finally:
@@ -308,7 +310,29 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         # if self.__state[pin] == state:
         #     return
         
-        port = self.__port_table[pin]
+        # port = self.__port_table[pin]
+        
+        port_overrides = map(lambda p: {
+            "native_networkconf_id": p["native_networkconf_id"],
+            "port_idx": p["port_idx"],
+            "poe_mode": ("auto" if state else "off") if str(p["port_idx"]) == pin else p["poe_mode"],
+            "name": p["name"],
+            "op_mode": p["op_mode"],
+            "forward": p.get("forward", "all"),
+            "port_keepalive_enabled": p.get("port_keepalive_enabled", False),
+			"port_security_enabled": p.get("port_security_enabled", False),
+			"port_security_mac_address": p.get("port_security_mac_address", []),
+			"setting_preference": p.get("setting_preference", "auto"),
+			"stormctrl_bcast_enabled": p.get("stormctrl_bcast_enabled", False),
+			"stormctrl_bcast_rate": p.get("stormctrl_bcast_rate", 100),
+			"stormctrl_mcast_enabled": p.get("stormctrl_mcast_enabled", False),
+			"stormctrl_mcast_rate": p.get("stormctrl_mcast_rate", 100),
+			"stormctrl_ucast_enabled": p.get("stormctrl_ucast_enabled", False),
+			"stormctrl_ucast_rate": p.get("stormctrl_ucast_rate", 100),
+			"stp_port_mode": p.get("stp_port_mode", True),
+			"tagged_vlan_mgmt": p.get("tagged_vlan_mgmt", "auto"),
+			"voice_networkconf_id": p.get("voice_networkconf_id", ""),
+        }, self.__port_overrides.values())
         
         # if self.__state[pin]["poe_enable"] == state:
         #     return
@@ -319,14 +343,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         # port_overrides = [port] # [self.__state[pin]]
         
         data={
-            "port_overrides": [{
-                "native_networkconf_id": port["native_networkconf_id"],
-                "port_idx": port["port_idx"],
-                "poe_enable": state,
-                "poe_mode": "auto" if state else "off",
-                "name": port["name"],
-                "op_mode": port["op_mode"],
-            }]
+            "port_overrides": list(port_overrides)
         }
 
         get_logger().info("Posting content %s: %s", pin, data)
@@ -346,18 +363,21 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
             # if response.status == 400:
             #     self.__csrf_token = None
             htclient.raise_not_200(response)
-            
+
             for header in response.headers:
                 if header.upper() == "X-CSRF-TOKEN":
                     self.__csrf_token = response.headers[header]
-            
+
             if response.cookies:
                 self.__http_session.cookie_jar.update_cookies(
                     response.cookies
                 )
 
-            self.__state[pin] = state
-            self.__port_table[pin]["poe_enable"] = state
+        result = await asyncio.sleep(5, result=state)
+
+        self.__port_table[pin]["poe_enable"] = result
+        self.__port_table[pin]["poe_mode"] = "auto" if result else "off"
+        self.__state[pin] = result
 
     # async def __inner_login(self) -> None:
     #     session = await self.__ensure_http_session()

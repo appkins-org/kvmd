@@ -11,3 +11,6 @@ test_redfish() {
 }
 
 test_redfish
+
+
+curl -s -k -u admin:admin https://pikvm/api/redfish/v1/Systems -H "If-Match: Etag"
