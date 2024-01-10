@@ -98,6 +98,14 @@ class RedfishApi:
             if sys_id not in self.__actions:
                 self.__actions[sys_id] = {}
             return (sys_id, "_".join(pts[1:]))
+        
+        async def cycle(c: str, delay: float, wait: bool) -> None:
+            get_logger().info(
+                "CYCLE CHANNEL: %s",
+                c
+            )
+            # valid_ugpio_channel(c)
+            await self.__user_gpio.pulse(c, delay, wait)
 
         async def sw(c: str, state: bool, wait: bool) -> None:
             get_logger().info(
@@ -115,7 +123,15 @@ class RedfishApi:
 
             for channel in state["outputs"].keys():
                 (sys_id, action_name) = split_channel(channel)
-
+                
+                if "ComputerSystem.Reset" not in self.__actions[sys_id]:
+                    self.__actions[sys_id]["ComputerSystem.Reset"] = {}
+                
+                if action_name == "cycle":
+                    self.__actions[sys_id]["ComputerSystem.Reset"].update({
+                        "ForceRestart": functools.partial(cycle, channel, 0.5),
+                    })
+                    
                 if action_name == "power":
                     ch = channel
                     get_logger().info(
@@ -134,13 +150,13 @@ class RedfishApi:
 
                     self.__actions[sys_id][
                         "ComputerSystem.Reset"
-                    ] = {
+                    ].update({
                         "On": on,
                         "ForceOn": on,
                         "ForceOff": off,
                         "GracefulShutdown": off,
                         "PushPowerButton": off,
-                    }
+                    })
                 else:
                     get_logger().info(
                         "NOT ADDING: %s",
