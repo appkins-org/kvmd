@@ -11,5 +11,50 @@
     "--disable=missing-module-docstring",
     "--disable=too-few-public-methods",
     "--disable=raise-missing-from",
-  ]
+    "--disable=unspecified-encoding",
+  ],
+  "vsicons.associations.folders": [
+    {
+      "icon": "src",
+      "extensions": [
+        "kvmd"
+      ],
+      "format": "svg"
+    },
+    {
+      "icon": "script",
+      "extensions": [
+        "hack"
+      ],
+      "format": "svg"
+    },
+    {
+      "icon": "json",
+      "extensions": [
+        "extras"
+      ],
+      "format": "svg"
+    },
+    {
+      "icon": "library",
+      "extensions": [
+        "hid"
+      ],
+      "format": "svg"
+    },
+    {
+      "icon": "locale",
+      "extensions": [
+        "contrib"
+      ],
+      "format": "svg"
+    },
+    {
+      "icon": "test",
+      "extensions": [
+        "testenv"
+      ],
+      "format": "svg"
+    }
+  ],
 }

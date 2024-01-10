@@ -4,6 +4,7 @@ kvmd_dir=/usr/lib/python3.11/site-packages
 src_dir=/home/appkins/src/appkins-org/kvmd
 
 ssh root@pikvm 'rw'
+sleep 0.5
 patch_files=(
     "kvmd/plugins/ugpio/unifi.py"
     "kvmd/apps/kvmd/server.py"
@@ -15,3 +16,4 @@ for item in "${patch_files[@]}"; do
 done
 scp "${src_dir}/hack/override.yaml" root@pikvm:/etc/kvmd/override.yaml
 ssh root@pikvm 'ro && systemctl restart kvmd'
+sleep 0.5
