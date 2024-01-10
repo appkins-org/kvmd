@@ -51,7 +51,6 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         self,
         instance_name: str,
         notifier: aiotools.AioNotifier,
-
         url: str,
         verify: bool,
         user: str,
@@ -107,6 +106,12 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         self.__state[pin] = None
 
     def prepare(self) -> None:
+        
+        for (pin, state) in self.__initial.items():
+            if state is None:
+                state = False
+            self.__state[pin] = { "poe_enable": state }
+        
         return
         # async def inner_prepare() -> None:
         #     await asyncio.gather(*[
@@ -117,8 +122,26 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         # aiotools.run_sync(inner_prepare())
 
     async def login(self) -> None:
+        session = self.__ensure_http_session()
+        get_logger().info(
+            "Logging into UNIFI"
+        )
         try:
-            self.__inner_login()
+            async with session.post(
+                url=f"{self.__url}/api/auth/login",
+                json={
+                    "username": self.__user,
+                    "password": self.__passwd
+                },
+                verify_ssl=self.__verify,
+            ) as response:
+                htclient.raise_not_200(response)
+                if "X-CSRF-TOKEN" in [h.upper() for h in response.headers]:
+                    self.__csrf_token = response.headers["X-CSRF-TOKEN"]
+                if response.cookies:
+                    session.cookie_jar.update_cookies(
+                        response.cookies
+                    )
         except Exception as err:
             get_logger().error(
                 "Failed UNIFI login request: %s",
@@ -128,8 +151,23 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
     async def run(self) -> None:
         prev_state: (dict | None) = None
         while True:
+            session = self.__ensure_http_session()
             try:
-                self.__inner_run()
+                if self.__csrf_token is None:
+                    await self.login()
+                async with session.get(
+                    url=f"{self.__api_url}/stat/device/{self.__mac}",
+                    headers=self.__get_headers(),
+                    verify_ssl=self.__verify
+                ) as response:
+                    self.__set_headers(response.headers)
+                    htclient.raise_not_200(response)
+                    status = (await response.json())["data"][0]
+                    if self.__id is None or self.__id != status["_id"]:
+                        self.__id = status["_id"]
+                    for pin in self.__state:
+                        if pin is not None:
+                            self.__state[pin] = status["port_table"][int(pin)]
             except Exception as err:
                 get_logger().error("Failed UNIFI bulk GET request: %s", tools.efmt(err))
                 self.__state = dict.fromkeys(self.__state, None)
@@ -150,8 +188,9 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
     async def read(self, pin: str) -> bool:
         try:
             return self.__inner_read(int(pin))
-        except Exception:
-            raise GpioDriverOfflineError(self)
+        except Exception as err:
+            raise err
+            # raise GpioDriverOfflineError(self)
 
     async def write(self, pin: str, state: bool) -> None:
         try:
@@ -162,7 +201,8 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
                 pin,
                 tools.efmt(err)
             )
-            raise GpioDriverOfflineError(self)
+            # raise err
+            # raise GpioDriverOfflineError(self)
         
         if self.__should_cycle(pin) is True:
             await asyncio.sleep(1)
@@ -179,9 +219,13 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         return cycle
 
     def __inner_read(self, pin: int) -> bool:
-        if self.__state[pin] is None:
-            raise GpioDriverOfflineError(self)
-        return self.__state[pin]["poe_enable"]
+        if pin in self.__state and self.__state[pin] is not None:
+            return self.__state[pin]["poe_enable"]
+        else:
+            get_logger().error("Failed to find pin: %s", pin)
+            self.__state[pin] = { "poe_enable": False }
+            self.__inner_run()
+            return False
 
     async def __inner_run(self) -> None:
         session = self.__ensure_http_session()
@@ -190,13 +234,10 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
                 await self.login()
             async with session.get(
                 url=f"{self.__api_url}/stat/device/{self.__mac}",
-                headers={
-                    "Accept": "application/json",
-                    "X-CSRF-TOKEN": self.__csrf_token,
-                },
-                verify_ssl=self.__verify) as response:
-                if "X-CSRF-TOKEN" in [h.upper() for h in response.headers]:
-                    self.__csrf_token = response.headers["X-CSRF-TOKEN"]
+                headers=self.__get_headers(),
+                verify_ssl=self.__verify
+            ) as response:
+                self.__set_headers(response.headers)
                 htclient.raise_not_200(response)
                 status = (await response.json())["data"][0]
                 if self.__id is None or self.__id != status["_id"]:
@@ -241,6 +282,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
         port_overrides = [self.__state[pin]]
 
         get_logger().info("Posting content %s: %s", pin, port_overrides)
+        
         async with session.put(
             url=f"{self.__api_url}/rest/device/{self.__id}",
             json={"port_overrides": port_overrides},
@@ -268,12 +310,12 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
                     response.cookies
                 )
 
-    def __get_headers(self, extra: dict[str, str] = None) -> dict[str, str]:
-        headers = {
+    def __get_headers(self, extra: (dict[str, str] | None) = None) -> dict[str, str]:
+        headers: dict[str, str] = {
             "Accept": "application/json",
             "X-CSRF-TOKEN": self.__csrf_token,
         }
-        return headers.copy(extra) if extra else headers
+        return headers.copy(extra) if (extra is not None) else headers
 
     def __set_headers(self, response_headers: dict[str, str]) -> None:
         if "X-CSRF-TOKEN" in [h.upper() for h in response_headers]:
@@ -294,13 +336,7 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
 
             self.__http_session = aiohttp.ClientSession(**kwargs)
             get_logger(0).info("Opened %s on %s", self, self.__http_session)
-        try:
-            yield self.__http_session
-        except Exception as err:
-            get_logger(0).error("Error occured on %s on %s: %s",
-                                self, self.__http_session, tools.efmt(err))
-            self.cleanup()
-            raise
+        return self.__http_session
 
     def __str__(self) -> str:
         return f"UNIFI({self._instance_name})"
