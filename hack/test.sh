@@ -12,6 +12,6 @@ test_redfish() {
 
 test_redfish
 
-curl -s -k -u admin:admin -H "Content-Type: application/json" --data '{"ResetType": "ForceRestart"}' --request POST https://pikvm/api/redfish/v1/Systems/server3/Actions/ComputerSystem.Reset
+# curl -s -k -u admin:admin -H "Content-Type: application/json" --data '{"ResetType": "ForceRestart"}' --request POST https://pikvm/api/redfish/v1/Systems/server3/Actions/ComputerSystem.Reset
 
 # curl -s -k -u admin:admin https://pikvm/api/redfish/v1/Systems -H "If-Match: Etag"

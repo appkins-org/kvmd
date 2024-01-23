@@ -17,3 +17,21 @@ done
 scp "${src_dir}/hack/override.yaml" root@pikvm:/etc/kvmd/override.yaml
 ssh root@pikvm 'ro && systemctl restart kvmd'
 sleep 0.5
+
+
+kvmd_dir=/usr/lib/python3.11/site-packages
+src_dir=/home/appkins/src/appkins-org/kvmd
+until ssh root@pikvm 'rw'
+do
+   sleep 1
+   echo "Trying again. Try #$counter"
+done
+scp "${src_dir}/hack/override.yaml" root@pikvm:/etc/kvmd/override.yaml
+ssh root@pikvm 'ro && systemctl restart kvmd'
+
+
+until ssh root@pikvm 'journalctl -xeu kvmd -f'
+do
+   sleep 1
+   echo "Trying again. Try #$counter"
+done

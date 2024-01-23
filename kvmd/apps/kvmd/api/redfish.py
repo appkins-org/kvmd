@@ -98,7 +98,7 @@ class RedfishApi:
             if sys_id not in self.__actions:
                 self.__actions[sys_id] = {}
             return (sys_id, "_".join(pts[1:]))
-        
+
         async def cycle(c: str, delay: float, wait: bool) -> None:
             get_logger().info(
                 "CYCLE CHANNEL: %s",
@@ -123,15 +123,15 @@ class RedfishApi:
 
             for channel in state["outputs"].keys():
                 (sys_id, action_name) = split_channel(channel)
-                
+
                 if "ComputerSystem.Reset" not in self.__actions[sys_id]:
                     self.__actions[sys_id]["ComputerSystem.Reset"] = {}
-                
+
                 if action_name == "cycle":
                     self.__actions[sys_id]["ComputerSystem.Reset"].update({
                         "ForceRestart": functools.partial(cycle, channel, 0.5),
                     })
-                    
+
                 if action_name == "power":
                     ch = channel
                     get_logger().info(

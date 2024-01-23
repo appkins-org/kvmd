@@ -246,7 +246,7 @@ def _patch_raw(raw_config: dict) -> None:  # pylint: disable=too-many-branches
             del streamer_config["available_resolutions"]
 
 
-def _patch_dynamic(  # pylint: disable=too-many-locals
+def _patch_dynamic(  # pylint: disable=too-many-locals, disable=too-many-arguments
     raw_config: dict,
     config: Section,
     scheme: dict,
