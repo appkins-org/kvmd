@@ -2,7 +2,7 @@
 #                                                                            #
 #    KVMD - The main PiKVM daemon.                                           #
 #                                                                            #
-#    Copyright (C) 2018-2023  Maxim Devaev <mdevaev@gmail.com>               #
+#    Copyright (C) 2018-2024  Maxim Devaev <mdevaev@gmail.com>               #
 #                                                                            #
 #    This program is free software: you can redistribute it and/or modify    #
 #    it under the terms of the GNU General Public License as published by    #
@@ -121,7 +121,7 @@ class _SpiPhy(BasePhy):  # pylint: disable=too-many-instance-attributes
 
     @contextlib.contextmanager
     def connected(self) -> Generator[_SpiPhyConnection, None, None]:  # type: ignore
-        with self.__sw_cs_connected() as switch_cs:
+        with self.__sw_cs_connected() as switch_cs:  # pylint: disable=contextmanager-generator-missing-cleanup
             with contextlib.closing(spidev.SpiDev(self.__bus, self.__chip)) as spi:
                 spi.mode = 0
                 spi.no_cs = (not self.__hw_cs)
