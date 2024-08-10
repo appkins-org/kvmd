@@ -35,6 +35,8 @@ RUN pacman --noconfirm --ask=4 -Syy \
 		libbsd \
 		python \
 		python-pip \
+		python-build \
+		python-wheel \
 		python-setuptools \
 		python-tox \
 		python-mako \
@@ -57,6 +59,7 @@ RUN pacman --noconfirm --ask=4 -Syy \
 		python-pam \
 		python-pillow \
 		python-xlib \
+		python-mako \
 		libxkbcommon \
 		python-hidapi \
 		python-ldap \
@@ -94,19 +97,6 @@ RUN git clone https://github.com/pikvm/ustreamer \
 	&& make WITH_PYTHON=1 PREFIX=/usr DESTDIR=/ install \
 	&& cd - \
 	&& rm -rf ustreamer
-
-# FIXME: workaroung for legacy 1.x libgpido
-RUN pacman --noconfirm --ask=4 -R libgpiod
-ENV LIBGPIOD_PKG libgpiod-1.6.4
-RUN curl \
-		-o $LIBGPIOD_PKG.tar.gz \
-		https://git.kernel.org/pub/scm/libs/libgpiod/libgpiod.git/snapshot/$LIBGPIOD_PKG.tar.gz \
-	&& tar -xzvf $LIBGPIOD_PKG.tar.gz \
-	&& cd $LIBGPIOD_PKG \
-	&& ./autogen.sh --prefix=/usr --enable-tools=yes --enable-bindings-python \
-	&& make PREFIX=/usr install \
-	&& cd - \
-	&& rm -rf $LIBGPIOD_PKG{,.tar.gz}
 
 RUN mkdir -p \
 		/etc/kvmd/{nginx,vnc} \
