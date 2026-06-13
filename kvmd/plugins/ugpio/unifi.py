@@ -311,7 +311,9 @@ class Plugin(BaseUserGpioDriver):  # pylint: disable=too-many-instance-attribute
                 url=f"{self.__url}/api/auth/login",
                 json={
                     "username": self.__user,
-                    "password": self.__passwd
+                    "password": self.__passwd,
+                    "token": "",
+                    "rememberMe": False,
                 },
                 headers={
                     "Accept": "application/json",
